@@ -1,14 +1,10 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import to_date, col, from_json, current_date, current_timestamp, to_timestamp, create_map, lit
+from pyspark.sql.functions import to_date, col, from_json, current_date, current_timestamp, to_timestamp, create_map, lit, count
 from pyspark.sql.types import StructType, StructField, StringType
-import logging
-
-# Initialize Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("KafkaConsumer")
+import time
 
 try:
-    logger.info("=================================================== Initializing Spark session ===================================================")
+    print("=================================================== Initializing Spark session ===================================================")
 
     # Initializing Spark Session
     spark = SparkSession.builder \
@@ -19,7 +15,7 @@ try:
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
         .getOrCreate()
 
-    logger.info("=================================================== Spark session successfully initialized ===================================================")
+    print("=================================================== Spark session successfully initialized ===================================================")
 
     # Defining the schema for Kafka messages
     schema = StructType([
@@ -38,7 +34,7 @@ try:
         .option("startingOffsets", "earliest") \
         .load()
 
-    logger.info("=================================================== Successfully connected to Kafka topic ===================================================")
+    print("=================================================== Successfully connected to Kafka topic ===================================================")
 
     # Printing raw Kafka data to the console
     raw_query = kafka_df.select(col("value").cast("string").alias("raw_data"))
@@ -47,14 +43,14 @@ try:
         .outputMode("append") \
         .start()
 
-    logger.info("=================================================== Raw Kafka data is being printed to the console ===================================================")
+    print("=================================================== Raw Kafka data is being printed to the console ===================================================")
 
     # Deserializing Kafka data and applying schema
     parsed_df = kafka_df.select(
         from_json(col("value").cast("string"), schema).alias("data")
     ).filter(col("data").isNotNull())
 
-    logger.info("=================================================== Kafka data successfully parsed and validated ===================================================")
+    print("=================================================== Kafka data successfully parsed and validated ===================================================")
 
     # Transforming the filtered data
     transformed_df = parsed_df.select(
@@ -70,27 +66,46 @@ try:
         ).alias("signals")
     )
 
-    # Printing transformed data to the console
-    transformed_query = transformed_df.writeStream \
-        .format("console") \
-        .outputMode("append") \
-        .start() 
+    print("=================================================== Data transformation applied ===================================================")
 
-    logger.info("=================================================== Transformed data is being printed to the console ===================================================")
+    # Counting the number of records in the transformed data
+    def log_transformed_data_count(batch_df, batch_id):
+        count = batch_df.count()
+        print(f"Batch ID: {batch_id} | Transformed Data Count: {count}")
+
+    transformed_query = transformed_df.writeStream \
+        .foreachBatch(log_transformed_data_count) \
+        .start()
 
     # Writing the transformed data to Delta table
+    def log_delta_write(batch_df, batch_id):
+        count = batch_df.count()
+        print(f"Batch ID: {batch_id} | Writing {count} records to Delta table")
+        batch_df.write.format("delta").mode("append").save("/home/xs535-himary/Downloads/Data-AI-main/data/delta/tables/wind_data")
+
     delta_stream = transformed_df.writeStream \
-        .format("delta") \
-        .outputMode("append") \
+        .foreachBatch(log_delta_write) \
         .option("checkpointLocation", "/home/xs535-himary/Downloads/Data-AI-main/data/checkpoints/delta_kafka_consumer") \
-        .start("/home/xs535-himary/Downloads/Data-AI-main/data/delta/tables/wind_data")
+        .start()
 
-    logger.info("=================================================== Delta table write initialized successfully ===================================================")
+    print("=================================================== Delta table write initialized successfully ===================================================")
 
-    # Waiting for the stream to finish
-    delta_stream.awaitTermination()
+    # Automatic stop after a timeout (e.g., 60 seconds)
+    timeout = 60  # Timeout in seconds
+    start_time = time.time()
+
+    while delta_stream.isActive:
+        if time.time() - start_time > timeout:
+            print("=================================================== Timeout reached, stopping the stream ===================================================")
+            delta_stream.stop()
+            break
+        time.sleep(5)  # Check every 5 seconds
+
+    # Stop the Spark session
+    spark.stop()
+    print("=================================================== Spark session stopped ===================================================")
 
 except Exception as e:
-    logger.critical(f"Critical failure: {e}")
+    print(f"Critical failure: {e}")
     spark.stop()
     exit()
